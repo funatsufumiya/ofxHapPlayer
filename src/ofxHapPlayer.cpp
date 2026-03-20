@@ -46,6 +46,16 @@ extern "C" {
 #include <dispatch/dispatch.h>
 #endif
 
+#define OFXHAP_DEBUG_PACKET 1
+
+/*
+ * Enable packet/frame debug logging by defining `OFXHAP_DEBUG_PACKET` to 1.
+ * Keeps logs quiet by default.
+ */
+#ifndef OFXHAP_DEBUG_PACKET
+#define OFXHAP_DEBUG_PACKET 0
+#endif
+
 // This amount will be bufferred before and after the playhead
 #define kofxHapPlayerBufferUSec INT64_C(250000)
 #define kofxHapPlayerUSecPerSec 1000000L
@@ -126,6 +136,26 @@ namespace ofxHapPY {
 
     static bool frameMatchesStream(unsigned int frame, uint32_t stream)
     {
+        // Accept both little-endian MKTAG-style and big-endian FourCC values
+        auto fourccFromBE = [](uint32_t v) {
+            char s[5] = {0};
+            s[0] = static_cast<char>((v >> 24) & 0xFF);
+            s[1] = static_cast<char>((v >> 16) & 0xFF);
+            s[2] = static_cast<char>((v >> 8) & 0xFF);
+            s[3] = static_cast<char>(v & 0xFF);
+            return std::string(s);
+        };
+        std::string fc = fourccFromBE(stream);
+        if (fc == "Hap1") {
+            return (frame == HapTextureFormat_RGB_DXT1);
+        }
+        if (fc == "Hap5") {
+            return (frame == HapTextureFormat_RGBA_DXT5);
+        }
+        if (fc == "HapY") {
+            return (frame == HapTextureFormat_YCoCg_DXT5);
+        }
+        // Fall back to checking numeric MKTAG value (legacy)
         switch (stream) {
             case MKTAG('H', 'a', 'p', '1'):
                 if (frame == HapTextureFormat_RGB_DXT1)
@@ -353,7 +383,10 @@ ofTexture* ofxHapPlayer::getTexture()
 #if OFX_HAP_HAS_CODECPAR
         switch (_videoStream->codecpar->codec_tag) {
 #else
-        switch (_videoStream->codec->codec_tag) {
+        uint32_t tag = 0;
+        if (_videoStream->codec) tag = _videoStream->codec->codec_tag;
+        else if (_videoStream->codecpar) tag = _videoStream->codecpar->codec_tag;
+        switch (tag) {
 #endif
             case MKTAG('H', 'a', 'p', '1'):
                 internalFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
@@ -945,13 +978,26 @@ void ofxHapPlayer::update(ofEventArgs & args)
             }
             if (found)
             {
+                // Debug: packet metadata
+#if OFXHAP_DEBUG_PACKET
+                ofLogNotice("ofxHapPlayer") << "Packet found pts=" << packet->pts
+                                              << " pos=" << packet->pos
+                                              << " size=" << packet->size
+                                              << " stream_index=" << packet->stream_index;
+#endif
                 unsigned int textureCount;
                 unsigned int hapResult = HapGetFrameTextureCount(packet->data, packet->size, &textureCount);
+#if OFXHAP_DEBUG_PACKET
+                ofLogNotice("ofxHapPlayer") << "HapGetFrameTextureCount result=" << hapResult << " count=" << textureCount;
+#endif
                 if (hapResult == HapResult_No_Error && textureCount == 1)
                 {
                     unsigned int textureFormat;
                     hapResult = HapGetFrameTextureFormat(packet->data, packet->size, 0, &textureFormat);
                     uint32_t streamTag = 0;
+#if OFXHAP_DEBUG_PACKET
+                    ofLogNotice("ofxHapPlayer") << "HapGetFrameTextureFormat result=" << hapResult << " format=" << textureFormat;
+#endif
 #if OFX_HAP_HAS_CODECPAR
                     if (_videoStream && _videoStream->codecpar) streamTag = _videoStream->codecpar->codec_tag;
 #else
@@ -959,6 +1005,9 @@ void ofxHapPlayer::update(ofEventArgs & args)
                         if (_videoStream->codec) streamTag = _videoStream->codec->codec_tag;
                         else if (_videoStream->codecpar) streamTag = _videoStream->codecpar->codec_tag;
                     }
+#endif
+#if OFXHAP_DEBUG_PACKET
+                    ofLogNotice("ofxHapPlayer") << "streamTag=" << streamTag;
 #endif
                     if (hapResult == HapResult_No_Error && !ofxHapPY::frameMatchesStream(textureFormat, streamTag))
                     {
@@ -969,7 +1018,15 @@ void ofxHapPlayer::update(ofEventArgs & args)
 #if OFX_HAP_HAS_CODECPAR
                         size_t length = ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->width) * ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->height);
 #else
-                        size_t length = ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->width) * ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->height);
+                        size_t width = 0, height = 0;
+                        if (_videoStream->codec) {
+                            width = _videoStream->codec->width;
+                            height = _videoStream->codec->height;
+                        } else if (_videoStream->codecpar) {
+                            width = _videoStream->codecpar->width;
+                            height = _videoStream->codecpar->height;
+                        }
+                        size_t length = ofxHapPY::roundUpToMultipleOf4(static_cast<int>(width)) * ofxHapPY::roundUpToMultipleOf4(static_cast<int>(height));
 #endif
                         if (textureFormat == HapTextureFormat_RGB_DXT1)
                         {
@@ -978,6 +1035,9 @@ void ofxHapPlayer::update(ofEventArgs & args)
                         if (_decodedFrame.buffer.size() != length)
                         {
                             _decodedFrame.buffer.resize(length);
+#if OFXHAP_DEBUG_PACKET
+                            ofLogNotice("ofxHapPlayer") << "Resized decoded buffer to " << length << " bytes";
+#endif
                         }
                         unsigned long bytesUsed;
                         hapResult = HapDecode(packet->data,
@@ -989,6 +1049,9 @@ void ofxHapPlayer::update(ofEventArgs & args)
                                               static_cast<unsigned long>(_decodedFrame.buffer.size()),
                                               &bytesUsed,
                                               &textureFormat);
+#if OFXHAP_DEBUG_PACKET
+                        ofLogNotice("ofxHapPlayer") << "HapDecode result=" << hapResult << " bytesUsed=" << bytesUsed << " textureFormat=" << textureFormat;
+#endif
                     }
                 }
                 if (hapResult == HapResult_No_Error)
@@ -997,10 +1060,16 @@ void ofxHapPlayer::update(ofEventArgs & args)
                     _decodedFrame.duration = packet->duration;
                     _decodedFrame.index = packet->pos;
                     _wantsUpload = true;
+#if OFXHAP_DEBUG_PACKET
+                    ofLogNotice("ofxHapPlayer") << "Decoded frame pts=" << _decodedFrame.pts << " duration=" << _decodedFrame.duration << " index=" << _decodedFrame.index << " _wantsUpload=true";
+#endif
                 }
                 else
                 {
                     _decodedFrame.invalidate();
+#if OFXHAP_DEBUG_PACKET
+                    ofLogWarning("ofxHapPlayer") << "Hap decode failed: result=" << hapResult;
+#endif
                 }
                 av_packet_free(&packet);
             }
