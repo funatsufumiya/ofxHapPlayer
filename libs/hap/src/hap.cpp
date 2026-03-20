@@ -25,6 +25,8 @@
  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+extern "C" {
+
 #include "hap.h"
 #include <stdlib.h>
 #include <stdint.h>
@@ -1063,3 +1065,5 @@ unsigned int HapGetFrameTextureFormat(const void *inputBuffer, unsigned long inp
     }
     return result;
 }
+
+} // extern "C"
