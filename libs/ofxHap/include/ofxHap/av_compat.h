@@ -127,7 +127,14 @@ static inline void av_packet_unref(AVPacket *p) {
 
 // allocation helpers used by older code
 static inline void *av_malloc(size_t s) { return std::malloc(s); }
-static inline void av_freep(void *p) { std::free(p); }
+// av_freep should accept the address of any pointer type (e.g. AVPacket**).
+// Use a template to accept T** and free the pointed allocation, then null the pointer.
+template<typename T>
+static inline void av_freep(T **p) {
+    if (!p || !*p) return;
+    std::free(static_cast<void*>(*p));
+    *p = nullptr;
+}
 
 // simple time functions
 static inline int64_t av_gettime_relative() {

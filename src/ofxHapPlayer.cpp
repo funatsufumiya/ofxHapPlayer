@@ -872,26 +872,141 @@ void ofxHapPlayer::setTimeout(int microseconds)
 }
 
 // Event handler called from ofEvents().update
-void ofxHapPlayer::update(ofEventArgs& args)
-{
-    (void)args;
-    update();
-}
-
-// Public update called by users or the event handler
 void ofxHapPlayer::update()
 {
-    std::lock_guard<std::mutex> guard(_lock);
-    // Update internal time reference
-    updatePTS();
-
-    // Minimal update implementation: ensure decoded frame upload flag
-    // remains controlled by demuxer/packet processing. This stub keeps
-    // behaviour consistent while audio support is disabled.
-    (void)_wantsUpload;
+    ofEventArgs args;
+    update(args);
 }
 
-// audio unsupported: implementations removed
+void ofxHapPlayer::update(ofEventArgs & args)
+{
+    std::lock_guard<std::mutex> guard(_lock);
+
+    // Calculate our current position for video and audio (if present)
+    updatePTS();
+
+    if (!_loaded)
+    {
+        return;
+    }
+
+    int64_t pts = _clock.getTime();
+
+    // Sequences ahead of us (to request from the demuxer) and to keep cached
+    ofxHap::TimeRangeSequence future = ofxHap::MovieTime::nextRanges(_clock, _frameTime, std::min(_clock.period, kofxHapPlayerBufferUSec));
+    ofxHap::TimeRangeSequence cache = ofxHap::MovieTime::nextRanges(_clock, _frameTime - kofxHapPlayerBufferUSec, std::min(_clock.period, kofxHapPlayerBufferUSec * INT64_C(2)));
+    // Rescale the cache for video
+    ofxHap::TimeRangeSet vcache;
+    for (auto& range : cache)
+    {
+        // Careful rounding: don't discard needed samples - important at low rates when timebase is framerate
+        ofxHap::TimeRange vrange(av_rescale_q_rnd(range.start, { 1, AV_TIME_BASE }, _videoStream->time_base, AV_ROUND_DOWN),
+                                 av_rescale_q_rnd(range.length, { 1, AV_TIME_BASE }, _videoStream->time_base, AV_ROUND_UP));
+        vcache.add(vrange);
+    }
+    // Release any packets we no longer need
+    _videoPackets.limit(vcache);
+
+    _active = _active.intersection(cache);
+
+    read(future);
+
+    int64_t vidPosition;
+    if (_clock.getDone())
+    {
+        // Don't use pts from the clock which is duration - we want the last frame time
+        vidPosition = _videoStream->duration - 1;
+        // Stop if we have got to the end of the movie and aren't looping
+        _playing = false;
+    }
+    else
+    {
+        vidPosition = av_rescale_q_rnd(pts, { 1, AV_TIME_BASE }, _videoStream->time_base, AV_ROUND_DOWN);
+    }
+    // No frame if the movie position outlies the video track length
+    if (vidPosition > _videoStream->duration || (_videoStream->start_time != AV_NOPTS_VALUE && vidPosition < _videoStream->start_time))
+    {
+        _decodedFrame.invalidate();
+    }
+    else
+    {
+        // Retrieve the video frame if necessary
+        bool inBuffer = (_decodedFrame.isValid() && _decodedFrame.pts <= vidPosition && _decodedFrame.pts + _decodedFrame.duration > vidPosition) ? true : false;
+        if (!inBuffer)
+        {
+            AVPacket *packet = av_packet_alloc();
+            packet->data = NULL;
+            packet->size = 0;
+            // Fetch a stored packet, blocking until our timeout only if necessary
+            bool found = _videoPackets.fetch(vidPosition, packet);
+            if (!found && _demuxer->isActive())
+            {
+                found = _videoPackets.fetch(vidPosition, packet, _timeout);
+            }
+            if (found)
+            {
+                unsigned int textureCount;
+                unsigned int hapResult = HapGetFrameTextureCount(packet->data, packet->size, &textureCount);
+                if (hapResult == HapResult_No_Error && textureCount == 1)
+                {
+                    unsigned int textureFormat;
+                    hapResult = HapGetFrameTextureFormat(packet->data, packet->size, 0, &textureFormat);
+                    uint32_t streamTag = 0;
+#if OFX_HAP_HAS_CODECPAR
+                    if (_videoStream && _videoStream->codecpar) streamTag = _videoStream->codecpar->codec_tag;
+#else
+                    if (_videoStream) {
+                        if (_videoStream->codec) streamTag = _videoStream->codec->codec_tag;
+                        else if (_videoStream->codecpar) streamTag = _videoStream->codecpar->codec_tag;
+                    }
+#endif
+                    if (hapResult == HapResult_No_Error && !ofxHapPY::frameMatchesStream(textureFormat, streamTag))
+                    {
+                        hapResult = HapResult_Bad_Frame;
+                    }
+                    if (hapResult == HapResult_No_Error)
+                    {
+#if OFX_HAP_HAS_CODECPAR
+                        size_t length = ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->width) * ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->height);
+#else
+                        size_t length = ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->width) * ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->height);
+#endif
+                        if (textureFormat == HapTextureFormat_RGB_DXT1)
+                        {
+                            length /= 2;
+                        }
+                        if (_decodedFrame.buffer.size() != length)
+                        {
+                            _decodedFrame.buffer.resize(length);
+                        }
+                        unsigned long bytesUsed;
+                        hapResult = HapDecode(packet->data,
+                                              packet->size,
+                                              0,
+                                              ofxHapPY::doDecode,
+                                              NULL,
+                                              _decodedFrame.buffer.data(),
+                                              static_cast<unsigned long>(_decodedFrame.buffer.size()),
+                                              &bytesUsed,
+                                              &textureFormat);
+                    }
+                }
+                if (hapResult == HapResult_No_Error)
+                {
+                    _decodedFrame.pts = packet->pts;
+                    _decodedFrame.duration = packet->duration;
+                    _decodedFrame.index = packet->pos;
+                    _wantsUpload = true;
+                }
+                else
+                {
+                    _decodedFrame.invalidate();
+                }
+                av_packet_free(&packet);
+            }
+        }
+    }
+}
 
 ofxHapPlayer::DecodedFrame::DecodedFrame() :
     pts(AV_NOPTS_VALUE), duration(0)
