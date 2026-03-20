@@ -25,17 +25,20 @@
  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+// New Demuxer implementation using lightweight MOV parser (tcxMovParser)
 #include <ofxHap/Demuxer.h>
-#include <ofxHap/Common.h>
-extern "C" {
-#include <libavformat/avformat.h>
-}
+#include <ofxHap/ffmpeg_compat.h>
+#include <ofxHap/tcxMovParser.h>
 #include <mutex>
+#include <memory>
+#include <algorithm>
+
+using namespace tcx::hap;
 
 ofxHap::Demuxer::Demuxer(const std::string& movie, PacketReceiver& receiver) :
-_lastRead(AV_NOPTS_VALUE), _lastSeek(AV_NOPTS_VALUE),
-_thread(&ofxHap::Demuxer::threadMain, this, movie, std::ref(receiver)),
-_finish(false), _active(false)
+    _lastRead(AV_NOPTS_VALUE), _lastSeek(AV_NOPTS_VALUE),
+    _thread(&ofxHap::Demuxer::threadMain, this, movie, std::ref(receiver)),
+    _finish(false), _active(false)
 {
 
 }
@@ -50,186 +53,169 @@ ofxHap::Demuxer::~Demuxer()
     _thread.join();
 }
 
+// Helper to create an AVStream based on MovTrack
+static AVStream *create_stream_from_track(const MovTrack &track, int index)
+{
+    AVStream *s = static_cast<AVStream*>(std::malloc(sizeof(AVStream)));
+    std::memset(s, 0, sizeof(AVStream));
+    s->codecpar = static_cast<AVCodecParameters*>(std::malloc(sizeof(AVCodecParameters)));
+    std::memset(s->codecpar, 0, sizeof(AVCodecParameters));
+    s->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    // map FourCC to codec_tag
+    s->codecpar->codec_tag = track.codecFourCC;
+    // if FourCC is Hap*, mark codec id as HAP
+    if (track.codecFourCC == FOURCC_HAP1 || track.codecFourCC == FOURCC_HAP5 || track.codecFourCC == FOURCC_HAPY || track.codecFourCC == FOURCC_HAPM || track.codecFourCC == FOURCC_HAPA) {
+        s->codecpar->codec_id = AV_CODEC_ID_HAP;
+    }
+    s->codecpar->width = track.width;
+    s->codecpar->height = track.height;
+    s->time_base.num = 1;
+    s->time_base.den = track.timescale > 0 ? static_cast<int>(track.timescale) : 1;
+    s->duration = track.duration;
+    s->start_time = 0;
+    s->index = index;
+    s->nb_frames = static_cast<int64_t>(track.samples.size());
+    s->codec = nullptr;
+    return s;
+}
+
+// free stream
+static void free_stream(AVStream *s)
+{
+    if (!s) return;
+    if (s->codecpar) std::free(s->codecpar);
+    std::free(s);
+}
+
 void ofxHap::Demuxer::threadMain(const std::string movie, PacketReceiver& receiver)
 {
-    if (movie.length() > 0)
-    {
-        static std::once_flag registerFlag;
-        std::call_once(registerFlag, [](){
-            av_log_set_level(AV_LOG_QUIET);
-            avformat_network_init();
-        });
-        AVFormatContext *fmt_ctx = NULL;
-        int videoStreamIndex = -1;
-        int audioStreamIndex = -1;
-        int result = avformat_open_input(&fmt_ctx, movie.c_str(), NULL, NULL);
-        if (result == 0)
-        {
-            result = avformat_find_stream_info(fmt_ctx, NULL);
-        }
-        if (result == 0)
-        {
-            receiver.foundMovie(fmt_ctx->duration);
-            for (unsigned int i = 0; i < fmt_ctx->nb_streams; i++) {
-#if OFX_HAP_HAS_CODECPAR
-                if (fmt_ctx->streams[i]->codecpar->codec_id == AV_CODEC_ID_HAP && videoStreamIndex == -1)
-#else
-                if (fmt_ctx->streams[i]->codec->codec_id == AV_CODEC_ID_HAP && videoStreamIndex == -1)
-#endif
-                {
-                    videoStreamIndex = i;
-                }
-                else
-                {
-                    fmt_ctx->streams[i]->discard = AVDISCARD_ALL;
-                }
-            }
+    if (movie.empty()) return;
 
-            if (videoStreamIndex == -1)
-            {
-                result = AVERROR_INVALIDDATA;
-            }
-
-            if (result >= 0)
-            {
-                receiver.foundStream(fmt_ctx->streams[videoStreamIndex]);
-            }
-        }
-        if (result >= 0)
-        {
-            result = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-            if (result >= 0)
-            {
-                audioStreamIndex = result;
-                fmt_ctx->streams[audioStreamIndex]->discard = AVDISCARD_DEFAULT;
-                receiver.foundStream(fmt_ctx->streams[audioStreamIndex]);
-            }
-            result = 0; // Not an error to have no audio
-        }
-        if (result < 0)
-        {
-            receiver.error(result);
-        }
-        else
-        {
-            receiver.foundAllStreams();
-
-            // We have local copies of our member variables so we don't hold the lock
-            // while we do work
-            bool finish = false;
-            std::queue<Action> actions;
-            int64_t lastReadVideo = AV_NOPTS_VALUE;
-            int64_t lastReadAudio = AV_NOPTS_VALUE;
-
-            AVPacket *packet = av_packet_alloc();
-            
-            while (!finish)
-            {
-                if (actions.size() > 0)
-                {
-                    const Action& action = actions.front();
-
-                    switch (action.kind) {
-                        case Action::Kind::SeekFrame:
-                            result = avformat_seek_file(fmt_ctx, videoStreamIndex, INT64_MIN, action.pts, action.pts, AVSEEK_FLAG_FRAME);
-                            lastReadAudio = lastReadVideo = AV_NOPTS_VALUE;
-                            receiver.discontinuity();
-                            break;
-                        case Action::Kind::SeekTime:
-                            result = avformat_seek_file(fmt_ctx, -1, INT64_MIN, action.pts, action.pts, 0);
-                            lastReadAudio = lastReadVideo = AV_NOPTS_VALUE;
-                            receiver.discontinuity();
-                            break;
-                        case Action::Kind::Read:
-                            if ((lastReadVideo == AV_NOPTS_VALUE || lastReadVideo < action.pts) ||
-                                (audioStreamIndex >= 0 && (lastReadAudio == AV_NOPTS_VALUE || lastReadAudio < action.pts)))
-                            {
-                                packet->data = NULL;
-                                packet->size = 0;
-                                result = av_read_frame(fmt_ctx, packet);
-                                if (result >= 0)
-                                {
-                                    if (packet->stream_index == videoStreamIndex)
-                                    {
-                                        packet->pos = av_index_search_timestamp(fmt_ctx->streams[videoStreamIndex], packet->pts, 0);
-                                    }
-
-                                    receiver.readPacket(packet);
-                                    if (packet->stream_index == videoStreamIndex)
-                                    {
-                                        lastReadVideo = av_rescale_q(packet->pts + packet->duration - 1,
-                                                                     fmt_ctx->streams[videoStreamIndex]->time_base, { 1, AV_TIME_BASE });
-                                    }
-                                    else if (packet->stream_index == audioStreamIndex)
-                                    {
-                                        lastReadAudio = av_rescale_q(packet->pts + packet->duration - 1,
-                                                                     fmt_ctx->streams[audioStreamIndex]->time_base, { 1, AV_TIME_BASE });
-                                    }
-                                }
-                                else if (result == AVERROR_EOF)
-                                {
-                                    receiver.endMovie();
-                                }
-                                av_packet_unref(packet);
-                            }
-                            break;
-                        default:
-                            break;
-                    }
-
-                    if (action.kind != Action::Kind::Read ||
-                        result < 0 ||
-                        (lastReadVideo >= action.pts && (audioStreamIndex == -1 || lastReadAudio >= action.pts)))
-                    {
-                        actions.pop();
-                    }
-
-                    if (result < 0 && result != AVERROR_EOF)
-                    {
-                        receiver.error(result);
-                    }
-                }
-
-                // Only hold the lock in this { scope }
-                {
-                    std::unique_lock<std::mutex> locker(_lock);
-
-                    finish = _finish;
-
-                    while (_actions.size() > 0) {
-                        const auto action = _actions.front();
-                        if (action.kind == Action::Kind::Cancel)
-                        {
-                            // empty queued actions
-                            std::queue<Action>().swap(actions);
-                        }
-                        else
-                        {
-                            actions.push(action);
-                        }
-                        _actions.pop();
-                    }
-
-                    result = 0;
-
-                    if (actions.size() == 0)
-                    {
-                        _active = false;
-                        if (finish == false)
-                        {
-                            _condition.wait(locker);
-                        }
-                    }
-                }
-            }
-            av_packet_free(&packet);
-        }
-
-        if (fmt_ctx)
-        {
-            avformat_close_input(&fmt_ctx);
-        }
+    MovParser parser;
+    if (!parser.open(movie)) {
+        receiver.error(-1);
+        return;
     }
+
+    const MovInfo &info = parser.getInfo();
+    int64_t duration_us = 0;
+    if (info.timescale > 0) {
+        duration_us = static_cast<int64_t>( (static_cast<double>(info.duration) / info.timescale) * AV_TIME_BASE );
+    }
+    receiver.foundMovie(duration_us);
+
+    // find video track
+    int videoIndex = -1;
+    for (size_t i = 0; i < info.tracks.size(); ++i) {
+        if (info.tracks[i].isVideo()) { videoIndex = static_cast<int>(i); break; }
+    }
+    if (videoIndex == -1) {
+        receiver.error(-1);
+        return;
+    }
+
+    // create AVStream for video only (audio not advertised for now)
+    AVStream *vstream = create_stream_from_track(info.tracks[videoIndex], 0);
+    receiver.foundStream(vstream);
+
+    receiver.foundAllStreams();
+
+    // Build read loop: respond to actions queue similar to original Demuxer
+    bool finish = false;
+    std::queue<Action> actions;
+
+    size_t sampleIndex = 0;
+    const MovTrack &vtrack = info.tracks[videoIndex];
+
+    while (!finish)
+    {
+        // move queued actions into local queue
+        {
+            std::unique_lock<std::mutex> locker(_lock);
+            finish = _finish;
+            while (_actions.size() > 0) {
+                const auto action = _actions.front();
+                actions.push(action);
+                _actions.pop();
+            }
+            if (actions.empty() && !finish) {
+                _active = false;
+                _condition.wait(locker);
+            }
+        }
+
+        while (!actions.empty() && !finish)
+        {
+            const Action &act = actions.front();
+            if (act.kind == Action::Kind::Cancel) {
+                // clear queued actions
+                std::queue<Action> empty;
+                std::swap(actions, empty);
+                break;
+            }
+
+            if (act.kind == Action::Kind::SeekTime)
+            {
+                // seek to time (in AV_TIME_BASE units)
+                int64_t target_us = act.pts;
+                // convert to track timescale units and find nearest sample
+                double target_seconds = static_cast<double>(target_us) / AV_TIME_BASE;
+                size_t found = 0;
+                for (size_t i = 0; i < vtrack.samples.size(); ++i) {
+                    if (vtrack.samples[i].timestamp >= target_seconds) { found = i; break; }
+                }
+                sampleIndex = found;
+                receiver.discontinuity();
+            }
+            else if (act.kind == Action::Kind::SeekFrame)
+            {
+                int64_t frame = act.pts;
+                sampleIndex = static_cast<size_t>(std::max<int64_t>(0, std::min<int64_t>(frame, static_cast<int64_t>(vtrack.samples.size()-1))));
+                receiver.discontinuity();
+            }
+            else if (act.kind == Action::Kind::Read)
+            {
+                // read until we cover act.pts (in AV_TIME_BASE)
+                int64_t target = act.pts;
+                int64_t lastRead = AV_NOPTS_VALUE;
+                while (sampleIndex < vtrack.samples.size()) {
+                    const MovSample &s = vtrack.samples[sampleIndex];
+                    // create packet
+                    AVPacket *pkt = av_packet_alloc();
+                    pkt->size = static_cast<int>(s.size);
+                    std::vector<uint8_t> tmp;
+                    if (!parser.readSample(vtrack, sampleIndex, tmp)) {
+                        av_packet_free(&pkt);
+                        break;
+                    }
+                    pkt->size = static_cast<int>(tmp.size());
+                    pkt->data = static_cast<uint8_t*>(std::malloc(pkt->size));
+                    if (!pkt->data) { av_packet_free(&pkt); break; }
+                    std::memcpy(pkt->data, tmp.data(), pkt->size);
+                    pkt->stream_index = 0;
+                    // pts/duration in stream time_base units
+                    pkt->pts = static_cast<int64_t>(s.timestamp * vtrack.timescale);
+                    pkt->duration = s.duration;
+                    pkt->pos = static_cast<int64_t>(sampleIndex);
+
+                    receiver.readPacket(pkt);
+
+                    // compute lastRead in AV_TIME_BASE
+                    lastRead = static_cast<int64_t>((s.timestamp) * AV_TIME_BASE);
+                    sampleIndex++;
+                    if (lastRead >= target) break;
+                }
+                if (sampleIndex >= vtrack.samples.size()) {
+                    receiver.endMovie();
+                }
+            }
+
+            actions.pop();
+        }
+
+    }
+
+    free_stream(vstream);
 }
 
 void ofxHap::Demuxer::read(int64_t pts)

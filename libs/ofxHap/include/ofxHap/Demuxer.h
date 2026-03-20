@@ -35,8 +35,8 @@
 #include <queue>
 #include "ErrorReceiving.h"
 
-typedef struct AVStream AVStream;
-typedef struct AVPacket AVPacket;
+// Minimal AV types provided by our lightweight compatibility header
+#include "ofxHap/ffmpeg_compat.h"
 
 namespace ofxHap {
     class PacketReceiver : public ErrorReceiving {
