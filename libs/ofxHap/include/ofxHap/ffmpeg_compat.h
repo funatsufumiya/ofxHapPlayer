@@ -7,6 +7,7 @@
 #include <climits>
 #include <chrono>
 #include <string>
+#include <cstdio>
 
 // Basic rational type
 typedef struct AVRational {
@@ -16,12 +17,15 @@ typedef struct AVRational {
 
 static inline int64_t av_rescale_q_rnd(int64_t a, AVRational bq, AVRational cq, int64_t /*round*/) {
     // compute a * bq.num/bq.den * cq.den/cq.num
-    // simplified: (a * bq.num * cq.den) / (bq.den * cq.num)
-    if (bq.num == 0 || cq.num == 0) return 0;
-    __int128_t num = (__int128_t)a * bq.num * cq.den;
-    __int128_t den = (__int128_t)bq.den * cq.num;
-    if (den == 0) return 0;
-    return static_cast<int64_t>(num / den);
+    // Use long double arithmetic to avoid GCC-only __int128 on MSVC.
+    if (bq.num == 0 || bq.den == 0 || cq.num == 0 || cq.den == 0) return 0;
+    long double val = (long double)a * (long double)bq.num * (long double)cq.den;
+    long double den = (long double)bq.den * (long double)cq.num;
+    if (den == 0.0L) return 0;
+    long double res = val / den;
+    if (res > (long double)INT64_MAX) return INT64_MAX;
+    if (res < (long double)INT64_MIN) return INT64_MIN;
+    return static_cast<int64_t>(res);
 }
 
 static const int64_t AV_TIME_BASE = 1000000LL;
