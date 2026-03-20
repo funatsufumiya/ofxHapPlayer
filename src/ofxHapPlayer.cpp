@@ -191,7 +191,7 @@ ofxHapPlayer::ofxHapPlayer() :
     _positionOnLoad(0.0)
 {
     _clock.setPausedAt(true, 0);
-    ofAddListener(ofEvents().update, this, &ofxHapPlayer::update);
+    _eventsListenerAdded = false;
 }
 
 ofxHapPlayer::~ofxHapPlayer()
@@ -200,7 +200,10 @@ ofxHapPlayer::~ofxHapPlayer()
     Close any loaded movie
     */
     close();
-    ofRemoveListener(ofEvents().update, this, &ofxHapPlayer::update);
+    if (_eventsListenerAdded) {
+        ofRemoveListener(ofEvents().update, this, &ofxHapPlayer::update);
+        _eventsListenerAdded = false;
+    }
 }
 
 bool ofxHapPlayer::load(string name)
@@ -226,6 +229,13 @@ bool ofxHapPlayer::load(string name)
     _positionOnLoad = 0.0;
 
     _demuxer = std::make_shared<ofxHap::Demuxer>(name, *this);
+
+    // Register update listener once the addon is actually loaded. Guard against
+    // calling before a window/events system exists.
+    if (!_eventsListenerAdded && ofGetWindowPtr()) {
+        ofAddListener(ofEvents().update, this, &ofxHapPlayer::update);
+        _eventsListenerAdded = true;
+    }
 
     /*
     Apply our current state to the movie
@@ -329,6 +339,10 @@ void ofxHapPlayer::close()
     _decodedFrame.clear();
     _loaded = false;
     _error.clear();
+    if (_eventsListenerAdded) {
+        ofRemoveListener(ofEvents().update, this, &ofxHapPlayer::update);
+        _eventsListenerAdded = false;
+    }
 }
 
 void ofxHapPlayer::read(ofxHap::TimeRangeSequence& sequence)

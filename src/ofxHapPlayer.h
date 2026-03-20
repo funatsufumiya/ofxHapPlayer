@@ -155,6 +155,7 @@ private:
     float               _volume;
     std::chrono::microseconds               _timeout;
     float               _positionOnLoad;
+    bool                _eventsListenerAdded;
 };
 
 #endif /* defined(__ofxHapPlayer__) */
