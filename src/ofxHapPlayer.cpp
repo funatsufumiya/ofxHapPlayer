@@ -380,28 +380,41 @@ ofTexture* ofxHapPlayer::getTexture()
     if (_wantsUpload && _videoStream)
     {
         GLenum internalFormat;
-#if OFX_HAP_HAS_CODECPAR
-        switch (_videoStream->codecpar->codec_tag) {
-#else
+        // Determine codec tag (prefer codecpar if present), then match FourCC
         uint32_t tag = 0;
-        if (_videoStream->codec) tag = _videoStream->codec->codec_tag;
-        else if (_videoStream->codecpar) tag = _videoStream->codecpar->codec_tag;
-        switch (tag) {
-#endif
-            case MKTAG('H', 'a', 'p', '1'):
-                internalFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
-                break;
-            case MKTAG('H', 'a', 'p', '5'):
-            case MKTAG('H', 'a', 'p', 'Y'):
-                internalFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
-                break;
-            case MKTAG('H', 'a', 'p', 'M'):
-                // TODO: HapM
-                // TODO: break;
-            default:
-                // TODO: fail
-                internalFormat = GL_RGBA;
-                break;
+        if (_videoStream->codecpar) tag = _videoStream->codecpar->codec_tag;
+        else if (_videoStream->codec) tag = _videoStream->codec->codec_tag;
+        auto fourccFromBE = [](uint32_t v) {
+            char s[5] = {0};
+            s[0] = static_cast<char>((v >> 24) & 0xFF);
+            s[1] = static_cast<char>((v >> 16) & 0xFF);
+            s[2] = static_cast<char>((v >> 8) & 0xFF);
+            s[3] = static_cast<char>(v & 0xFF);
+            return std::string(s);
+        };
+        std::string fc = fourccFromBE(tag);
+        if (fc == "Hap1") {
+            internalFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+        }
+        else if (fc == "Hap5" || fc == "HapY") {
+            internalFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+        }
+        else {
+            // fall back to legacy numeric MKTAG check
+            switch (tag) {
+                case MKTAG('H', 'a', 'p', '1'):
+                    internalFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+                    break;
+                case MKTAG('H', 'a', 'p', '5'):
+                case MKTAG('H', 'a', 'p', 'Y'):
+                    internalFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+                    break;
+                case MKTAG('H', 'a', 'p', 'M'):
+                    // TODO: HapM
+                default:
+                    internalFormat = GL_RGBA;
+                    break;
+            }
         }
         if (_texture.isAllocated() == false)
         {
@@ -430,6 +443,10 @@ ofTexture* ofxHapPlayer::getTexture()
             texData.textureTarget = GL_TEXTURE_2D;
             texData.glInternalFormat = internalFormat;
             _texture.allocate(texData, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
+
+#if OFXHAP_DEBUG_PACKET
+            ofLogNotice("ofxHapPlayer") << "Allocated texture: tex_w=" << _texture.texData.tex_w << " tex_h=" << _texture.texData.tex_h << " width=" << _texture.texData.width << " height=" << _texture.texData.height << " internalFormat=" << internalFormat;
+#endif
 
             // Now store the actual dimensions so drawing is correct
 #if OFX_HAP_HAS_CODECPAR
@@ -483,6 +500,10 @@ ofTexture* ofxHapPlayer::getTexture()
             internalFormat,
             static_cast<GLsizei>(_decodedFrame.buffer.size()),
             _decodedFrame.buffer.data());
+
+        #if OFXHAP_DEBUG_PACKET
+            ofLogNotice("ofxHapPlayer") << "Uploaded compressed tex: size=" << _decodedFrame.buffer.size() << " internalFormat=" << internalFormat << " width=" << (OFX_HAP_HAS_CODECPAR ? ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->width) : ofxHapPY::roundUpToMultipleOf4((_videoStream->codec ? _videoStream->codec->width : (_videoStream->codecpar ? _videoStream->codecpar->width : 0)))) << " height=" << (OFX_HAP_HAS_CODECPAR ? ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->height) : ofxHapPY::roundUpToMultipleOf4((_videoStream->codec ? _videoStream->codec->height : (_videoStream->codecpar ? _videoStream->codecpar->height : 0))));
+        #endif
 
 #if defined(TARGET_OSX)
         if (ofGetGLRenderer()->getGLVersionMajor() < 3)
@@ -562,6 +583,11 @@ void ofxHapPlayer::draw(float x, float y, float w, float h) {
         {
             sh->end();
         }
+    }
+    else {
+#if OFXHAP_DEBUG_PACKET
+        ofLogNotice("ofxHapPlayer") << "draw(): texture not allocated";
+#endif
     }
 }
 
