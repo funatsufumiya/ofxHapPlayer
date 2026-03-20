@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <atomic>
 #include <climits>
 #include <chrono>
 #include <string>
@@ -108,30 +109,84 @@ typedef struct AVPacket {
     int64_t pos;
 } AVPacket;
 
+// Optional memory allocation counters for debugging leaks.
+#ifndef OFXHAP_DEBUG_MEMCOUNTS
+#define OFXHAP_DEBUG_MEMCOUNTS 0
+#endif
+#if OFXHAP_DEBUG_MEMCOUNTS
+static std::atomic<size_t> ofxhap_malloc_count{0};
+static std::atomic<size_t> ofxhap_free_count{0};
+static std::atomic<size_t> ofxhap_av_malloc_count{0};
+static std::atomic<size_t> ofxhap_av_freep_count{0};
+static std::atomic<size_t> ofxhap_packet_alloc_count{0};
+static std::atomic<size_t> ofxhap_packet_free_count{0};
+static std::atomic<size_t> ofxhap_packet_data_malloc_count{0};
+static std::atomic<size_t> ofxhap_packet_data_free_count{0};
+static std::atomic<size_t> ofxhap_frame_clone_count{0};
+static std::atomic<size_t> ofxhap_frame_free_count{0};
+
+static inline void av_mem_counters_report()
+{
+    std::fprintf(stderr, "ofxHap mem: malloc=%zu free=%zu av_malloc=%zu av_freep=%zu packet_alloc=%zu packet_free=%zu pkt_data_malloc=%zu pkt_data_free=%zu frame_clone=%zu frame_free=%zu\n",
+                 ofxhap_malloc_count.load(), ofxhap_free_count.load(), ofxhap_av_malloc_count.load(), ofxhap_av_freep_count.load(), ofxhap_packet_alloc_count.load(), ofxhap_packet_free_count.load(), ofxhap_packet_data_malloc_count.load(), ofxhap_packet_data_free_count.load(), ofxhap_frame_clone_count.load(), ofxhap_frame_free_count.load());
+}
+#endif
+
 static inline AVPacket *av_packet_alloc() {
     AVPacket *p = static_cast<AVPacket*>(std::malloc(sizeof(AVPacket)));
     if (p) std::memset(p, 0, sizeof(AVPacket));
+#if OFXHAP_DEBUG_MEMCOUNTS
+    ofxhap_packet_alloc_count.fetch_add(1);
+    ofxhap_malloc_count.fetch_add(1);
+#endif
     return p;
 }
 static inline void av_packet_free(AVPacket **p) {
     if (!p || !*p) return;
-    if ((*p)->data) std::free((*p)->data);
+    if ((*p)->data) {
+#if OFXHAP_DEBUG_MEMCOUNTS
+        ofxhap_packet_data_free_count.fetch_add(1);
+        ofxhap_free_count.fetch_add(1);
+#endif
+        std::free((*p)->data);
+    }
+#if OFXHAP_DEBUG_MEMCOUNTS
+    ofxhap_packet_free_count.fetch_add(1);
+    ofxhap_free_count.fetch_add(1);
+#endif
     std::free(*p);
     *p = nullptr;
 }
 static inline void av_packet_unref(AVPacket *p) {
     if (!p) return;
-    if (p->data) { std::free(p->data); p->data = nullptr; }
+    if (p->data) {
+#if OFXHAP_DEBUG_MEMCOUNTS
+        ofxhap_packet_data_free_count.fetch_add(1);
+        ofxhap_free_count.fetch_add(1);
+#endif
+        std::free(p->data);
+        p->data = nullptr;
+    }
     p->size = 0;
 }
 
 // allocation helpers used by older code
-static inline void *av_malloc(size_t s) { return std::malloc(s); }
+static inline void *av_malloc(size_t s) {
+#if OFXHAP_DEBUG_MEMCOUNTS
+    ofxhap_av_malloc_count.fetch_add(1);
+    ofxhap_malloc_count.fetch_add(1);
+#endif
+    return std::malloc(s);
+}
 // av_freep should accept the address of any pointer type (e.g. AVPacket**).
 // Use a template to accept T** and free the pointed allocation, then null the pointer.
 template<typename T>
 static inline void av_freep(T **p) {
     if (!p || !*p) return;
+#if OFXHAP_DEBUG_MEMCOUNTS
+    ofxhap_av_freep_count.fetch_add(1);
+    ofxhap_free_count.fetch_add(1);
+#endif
     std::free(static_cast<void*>(*p));
     *p = nullptr;
 }
@@ -165,6 +220,10 @@ static inline int av_packet_ref(AVPacket *dst, const AVPacket *src) {
     if (!dst || !src) return -1;
     dst->data = static_cast<uint8_t*>(std::malloc(src->size));
     if (!dst->data) return -1;
+#if OFXHAP_DEBUG_MEMCOUNTS
+    ofxhap_packet_data_malloc_count.fetch_add(1);
+    ofxhap_malloc_count.fetch_add(1);
+#endif
     std::memcpy(dst->data, src->data, src->size);
     dst->size = src->size;
     dst->stream_index = src->stream_index;
@@ -259,6 +318,10 @@ static inline AVFrame *av_frame_clone(const AVFrame *src) {
     if (!src) return nullptr;
     AVFrame *f = static_cast<AVFrame*>(std::malloc(sizeof(AVFrame)));
     if (!f) return nullptr;
+#if OFXHAP_DEBUG_MEMCOUNTS
+    ofxhap_frame_clone_count.fetch_add(1);
+    ofxhap_malloc_count.fetch_add(1);
+#endif
     std::memcpy(f, src, sizeof(AVFrame));
     // do not duplicate audio buffers here; leave data null in cloned frame to avoid double-free
     f->data = nullptr;
@@ -268,6 +331,10 @@ static inline AVFrame *av_frame_clone(const AVFrame *src) {
 static inline void av_frame_free(AVFrame **f) {
     if (!f || !*f) return;
     // We don't own referenced audio buffers in this minimal implementation
+#if OFXHAP_DEBUG_MEMCOUNTS
+    ofxhap_frame_free_count.fetch_add(1);
+    ofxhap_free_count.fetch_add(1);
+#endif
     std::free(*f);
     *f = nullptr;
 }

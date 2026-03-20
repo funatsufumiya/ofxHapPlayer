@@ -189,7 +189,7 @@ void ofxHap::Demuxer::threadMain(const std::string movie, PacketReceiver& receiv
                         break;
                     }
                     pkt->size = static_cast<int>(tmp.size());
-                    pkt->data = static_cast<uint8_t*>(std::malloc(pkt->size));
+                    pkt->data = static_cast<uint8_t*>(av_malloc(pkt->size));
                     if (!pkt->data) { av_packet_free(&pkt); break; }
                     std::memcpy(pkt->data, tmp.data(), pkt->size);
                     pkt->stream_index = 0;
@@ -199,6 +199,8 @@ void ofxHap::Demuxer::threadMain(const std::string movie, PacketReceiver& receiv
                     pkt->pos = static_cast<int64_t>(sampleIndex);
 
                     receiver.readPacket(pkt);
+                    // free the original packet; PacketClone/PacketCache took ownership of a copy
+                    av_packet_free(&pkt);
 
                     // compute lastRead in AV_TIME_BASE
                     lastRead = static_cast<int64_t>((s.timestamp) * AV_TIME_BASE);

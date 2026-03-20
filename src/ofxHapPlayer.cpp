@@ -31,8 +31,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  A Hap player for OpenFrameworks
 
  */
+
+// #define OFXHAP_DEBUG_MEMCOUNTS 1
+
 #include "ofxHapPlayer.h"
 #include <ofxHap/Common.h>
+#include <ofxHap/av_compat.h>
 #include <ofxHap/RingBuffer.h>
 #include <ofxHap/MovieTime.h>
 extern "C" {
@@ -46,7 +50,7 @@ extern "C" {
 #include <dispatch/dispatch.h>
 #endif
 
-#define OFXHAP_DEBUG_PACKET 1
+// #define OFXHAP_DEBUG_PACKET 1
 
 /*
  * Enable packet/frame debug logging by defining `OFXHAP_DEBUG_PACKET` to 1.
@@ -943,6 +947,17 @@ void ofxHapPlayer::update(ofEventArgs & args)
 
     // Calculate our current position for video and audio (if present)
     updatePTS();
+
+#if OFXHAP_DEBUG_MEMCOUNTS
+    {
+        static int64_t last_stats_time = 0;
+        int64_t now_stats = av_gettime_relative();
+        if (now_stats - last_stats_time >= 1000000) { // 1 second
+            av_mem_counters_report();
+            last_stats_time = now_stats;
+        }
+    }
+#endif
 
     if (!_loaded)
     {
