@@ -37,9 +37,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <ofxHap/RingBuffer.h>
 #include <ofxHap/MovieTime.h>
 extern "C" {
-#include <libavformat/avformat.h>
-#include <libavutil/time.h>
-#include <libswresample/swresample.h>
 #include <hap.h>
 }
 #if defined(TARGET_WINVS)
@@ -124,6 +121,10 @@ namespace ofxHapPY {
 #endif
     }
 
+#ifndef MKTAG
+#define MKTAG(a,b,c,d) ((a) | ((b) << 8) | ((c) << 16) | ((unsigned)(d) << 24))
+#endif
+
     static bool frameMatchesStream(unsigned int frame, uint32_t stream)
     {
         switch (stream) {
@@ -151,7 +152,7 @@ namespace ofxHapPY {
 // 3. Pause in palindrome(low priority)
 
 ofxHapPlayer::ofxHapPlayer() :
-    _loaded(false), _videoStream(nullptr), _audioStreamIndex(-1), _frameTime(av_gettime_relative()), _playing(false),
+    _loaded(false), _videoStream(nullptr), _audioStreamIndex(-1), _frameTime(0), _playing(false),
     _wantsUpload(false),
     _demuxer(), _buffer(nullptr), _audioThread(nullptr), _audioOut(), _volume(1.0), _timeout(30000),
     _positionOnLoad(0.0)

@@ -27,27 +27,8 @@
 
 #ifndef ofxHap_Common_h
 
-extern "C" {
-#include <libavformat/version.h>
-#include <libavcodec/version.h>
-}
-
-#if (LIBAVFORMAT_VERSION_MAJOR > 57 || (LIBAVFORMAT_VERSION_MAJOR == 57 && LIBAVFORMAT_VERSION_MINOR >= 41))
-#define OFX_HAP_HAS_CODECPAR 1
-#else
 #define OFX_HAP_HAS_CODECPAR 0
-#endif
-
-#if (LIBAVCODEC_VERSION_MAJOR > 57 || (LIBAVCODEC_VERSION_MAJOR == 57 && LIBAVCODEC_VERSION_MINOR >= 24))
-#define OFX_HAP_HAS_PACKET_ALLOC 1
-#else
 #define OFX_HAP_HAS_PACKET_ALLOC 0
-#endif
-
-#if (LIBAVCODEC_VERSION_MAJOR > 59 || (LIBAVCODEC_VERSION_MAJOR == 59 && LIBAVCODEC_VERSION_MINOR >= 24))
-#define OFX_HAP_HAS_CHANNEL_LAYOUT 1
-#else
 #define OFX_HAP_HAS_CHANNEL_LAYOUT 0
-#endif
 
 #endif
