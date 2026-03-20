@@ -26,7 +26,7 @@
  */
 
 #include <ofxHap/PacketCache.h>
-#include <ofxHap/ffmpeg_compat.h>
+#include <ofxHap/av_compat.h>
 #include <ofxHap/TimeRangeSet.h>
 #include <ofxHap/Common.h>
 

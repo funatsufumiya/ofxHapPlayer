@@ -33,15 +33,14 @@
 #include <ofxHap/Clock.h>
 #include <ofxHap/PacketCache.h>
 #include <ofxHap/Demuxer.h>
-#include <ofxHap/AudioThread.h>
+#include <ofxHap/RingBuffer.h>
 #include <ofxHap/TimeRangeSet.h>
 
 namespace ofxHap {
-    class AudioThread;
     class RingBuffer;
 }
 
-class ofxHapPlayer : public ofBaseVideoPlayer, public ofxHap::PacketReceiver, public ofxHap::AudioThread::Receiver {
+class ofxHapPlayer : public ofBaseVideoPlayer, public ofxHap::PacketReceiver {
 public:
     ofxHapPlayer();
     virtual ~ofxHapPlayer();
@@ -118,8 +117,6 @@ private:
     virtual void    discontinuity() override;
     virtual void    endMovie() override;
     virtual void    error(int averror) override;
-    virtual void    startAudio() override;
-    virtual void    stopAudio() override;
     void            setPaused(bool pause, bool locked);
     void            setVideoPTSLoaded(int64_t pts, bool round_up);
     void            setPTSLoaded(int64_t pts);
@@ -127,23 +124,7 @@ private:
     void            update(ofEventArgs& args);
     void            updatePTS();
     void            read(ofxHap::TimeRangeSequence& sequence);
-    class AudioOutput : public ofBaseSoundOutput {
-    public:
-        AudioOutput();
-        ~AudioOutput();
-        void configure(int channels, int sampleRate, std::shared_ptr<ofxHap::RingBuffer> buffer);
-        void start();
-        void stop();
-        void close();
-        unsigned int getBestRate(unsigned int rate) const;
-        virtual void audioOut(ofSoundBuffer& buffer) override;
-    private:
-        bool                                _started;
-        int                                 _channels;
-        int                                 _sampleRate;
-        std::shared_ptr<ofxHap::RingBuffer> _buffer;
-        ofSoundStream                       _soundStream;
-    };
+    
     class DecodedFrame {
     public:
         DecodedFrame();
@@ -159,7 +140,6 @@ private:
     bool                _loaded;
     std::string         _error;
     AVStream            *_videoStream;
-    int                 _audioStreamIndex;
     DecodedFrame        _decodedFrame;
     ofxHap::Clock       _clock;
     uint64_t            _frameTime;
@@ -171,9 +151,7 @@ private:
     ofxHap::TimeRangeSet _active;
     ofxHap::LockingPacketCache              _videoPackets;
     std::shared_ptr<ofxHap::Demuxer>        _demuxer;
-    std::shared_ptr<ofxHap::RingBuffer>     _buffer;
-    std::shared_ptr<ofxHap::AudioThread>   _audioThread;
-    AudioOutput         _audioOut;
+    
     float               _volume;
     std::chrono::microseconds               _timeout;
     float               _positionOnLoad;

@@ -33,7 +33,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include "ofxHapPlayer.h"
 #include <ofxHap/Common.h>
-#include <ofxHap/AudioThread.h>
 #include <ofxHap/RingBuffer.h>
 #include <ofxHap/MovieTime.h>
 extern "C" {
@@ -152,9 +151,9 @@ namespace ofxHapPY {
 // 3. Pause in palindrome(low priority)
 
 ofxHapPlayer::ofxHapPlayer() :
-    _loaded(false), _videoStream(nullptr), _audioStreamIndex(-1), _frameTime(0), _playing(false),
+    _loaded(false), _videoStream(nullptr), _frameTime(0), _playing(false),
     _wantsUpload(false),
-    _demuxer(), _buffer(nullptr), _audioThread(nullptr), _audioOut(), _volume(1.0), _timeout(30000),
+    _demuxer(), _volume(1.0), _timeout(30000),
     _positionOnLoad(0.0)
 {
     _clock.setPausedAt(true, 0);
@@ -217,39 +216,27 @@ void ofxHapPlayer::foundStream(AVStream *stream)
     AVCodecID codecID = params->codec_id;
 #else
     AVCodecContext *codec = stream->codec;
-    AVMediaType type = codec->codec_type;
-    AVCodecID codecID = codec->codec_id;
+    AVMediaType type = AVMEDIA_TYPE_UNKNOWN;
+    AVCodecID codecID = AV_CODEC_ID_NONE;
+    if (codec) {
+        type = codec->codec_type;
+        codecID = codec->codec_id;
+    } else if (stream->codecpar) {
+        // Fall back to codecpar if codec context is not set
+        type = stream->codecpar->codec_type;
+        codecID = stream->codecpar->codec_id;
+    }
 #endif
     if (type == AVMEDIA_TYPE_VIDEO && codecID == AV_CODEC_ID_HAP)
     {
         _videoStream = stream;
     }
-    else if (type == AVMEDIA_TYPE_AUDIO)
-    {
-        // We will output silence until we have samples to play
-#if OFX_HAP_HAS_CODECPAR
-#if OFX_HAP_HAS_CHANNEL_LAYOUT
-        int channels = params->ch_layout.nb_channels;
-#else
-        int channels = params->channels;
-#endif
-        int sampleRate = params->sample_rate;
-        ofxHap::AudioParameters parameters(params, kofxHapPlayerBufferUSec, stream->start_time, stream->duration);
-#else
-        int channels = codec->channels;
-        int sampleRate = codec->sample_rate;
-        ofxHap::AudioParameters parameters(codec, kofxHapPlayerBufferUSec, stream->start_time, stream->duration);
-#endif
-        sampleRate = _audioOut.getBestRate(sampleRate);
-        _audioStreamIndex = stream->index;
-        _buffer = std::make_shared<ofxHap::RingBuffer>(channels, sampleRate / 8);
-
-        _audioOut.configure(channels, sampleRate, _buffer);
-
-        _audioThread = std::make_shared<ofxHap::AudioThread>(parameters, sampleRate, _buffer, *this);
-        _audioThread->setVolume(_volume);
-        _audioThread->sync(_clock, false);
-    }
+        else if (type == AVMEDIA_TYPE_AUDIO)
+        {
+        // Audio streams are ignored in this build (no audio support).
+        // Do nothing so `_audioStreamIndex` and `_audioThread` are not initialized.
+        (void)stream; // suppress unused variable warnings
+        }
 }
 
 void ofxHapPlayer::foundAllStreams()
@@ -266,30 +253,18 @@ void ofxHapPlayer::readPacket(AVPacket *packet)
     {
         _videoPackets.store(packet);
     }
-    else if (_audioThread && packet->stream_index == _audioStreamIndex)
-    {
-        _audioThread->send(packet);
-    }
 }
 
 void ofxHapPlayer::discontinuity()
 {
     // No need to lock
     _videoPackets.cache();
-    if (_audioThread)
-    {
-        _audioThread->flush();
-    }
 }
 
 void ofxHapPlayer::endMovie()
 {
     // No need to lock
-    if (_audioThread)
-    {
-        // signal end of stream
-        _audioThread->endOfStream();
-    }
+    // audio unsupported: no-op
 }
 
 void ofxHapPlayer::error(int averror)
@@ -309,15 +284,12 @@ void ofxHapPlayer::close()
 {
     std::lock_guard<std::mutex> guard(_lock);
     _demuxer.reset();
-    _audioThread.reset();
-    _audioOut.close();
-    _buffer.reset();
+    // audio unsupported: nothing to close
     _videoPackets.clear();
     _clock.period = 0;
     _clock.setPausedAt(true, 0);
     _wantsUpload = false;
     _videoStream = nullptr;
-    _audioStreamIndex = -1;
     _shader.unload();
     _texture.clear();
     _decodedFrame.clear();
@@ -347,146 +319,18 @@ void ofxHapPlayer::read(ofxHap::TimeRangeSequence& sequence)
     }
 }
 
-void ofxHapPlayer::update()
-{
-    ofEventArgs args;
-    update(args);
-}
-
-void ofxHapPlayer::update(ofEventArgs & args)
-{
-    std::lock_guard<std::mutex> guard(_lock);
-
-    // Calculate our current position for video and audio (if present)
-    updatePTS();
-
-    if (!_loaded)
-    {
-        return;
-    }
-
-    int64_t pts = _clock.getTime();
-
-    // Sequences ahead of us (to request from the demuxer) and to keep cached
-    ofxHap::TimeRangeSequence future = ofxHap::MovieTime::nextRanges(_clock, _frameTime, std::min(_clock.period, kofxHapPlayerBufferUSec));
-    ofxHap::TimeRangeSequence cache = ofxHap::MovieTime::nextRanges(_clock, _frameTime - kofxHapPlayerBufferUSec, std::min(_clock.period, kofxHapPlayerBufferUSec * INT64_C(2)));
-    // Rescale the cache for video
-    ofxHap::TimeRangeSet vcache;
-    for (auto& range : cache)
-    {
-        // Careful rounding: don't discard needed samples - important at low rates when timebase is framerate
-        ofxHap::TimeRange vrange(av_rescale_q_rnd(range.start, { 1, AV_TIME_BASE }, _videoStream->time_base, AV_ROUND_DOWN),
-                                 av_rescale_q_rnd(range.length, { 1, AV_TIME_BASE }, _videoStream->time_base, AV_ROUND_UP));
-        vcache.add(vrange);
-    }
-    // Release any packets we no longer need
-    _videoPackets.limit(vcache);
-
-    _active = _active.intersection(cache);
-
-    read(future);
-
-    int64_t vidPosition;
-    if (_clock.getDone())
-    {
-        // Don't use pts from the clock which is duration - we want the last frame time
-        vidPosition = _videoStream->duration - 1;
-        // Stop if we have got to the end of the movie and aren't looping
-        _playing = false;
-    }
-    else
-    {
-        vidPosition = av_rescale_q_rnd(pts, { 1, AV_TIME_BASE }, _videoStream->time_base, AV_ROUND_DOWN);
-    }
-    // No frame if the movie position outlies the video track length
-    if (vidPosition > _videoStream->duration || (_videoStream->start_time != AV_NOPTS_VALUE && vidPosition < _videoStream->start_time))
-    {
-        _decodedFrame.invalidate();
-    }
-    else
-    {
-        // Retreive the video frame if necessary
-        bool inBuffer = (_decodedFrame.isValid() && _decodedFrame.pts <= vidPosition && _decodedFrame.pts + _decodedFrame.duration > vidPosition) ? true : false;
-        if (!inBuffer)
-        {
-            AVPacket *packet = av_packet_alloc();
-            packet->data = NULL;
-            packet->size = 0;
-            // Fetch a stored packet, blocking until our timeout only if necessary
-            bool found = _videoPackets.fetch(vidPosition, packet);
-            if (!found && _demuxer->isActive())
-            {
-                found = _videoPackets.fetch(vidPosition, packet, _timeout);
-            }
-            if (found)
-            {
-                unsigned int textureCount;
-                unsigned int hapResult = HapGetFrameTextureCount(packet->data, packet->size, &textureCount);
-                if (hapResult == HapResult_No_Error && textureCount == 1) // TODO: Hap Q+A
-                {
-                    unsigned int textureFormat;
-                    hapResult = HapGetFrameTextureFormat(packet->data, packet->size, 0, &textureFormat);
-#if OFX_HAP_HAS_CODECPAR
-                    if (hapResult == HapResult_No_Error && !ofxHapPY::frameMatchesStream(textureFormat, _videoStream->codecpar->codec_tag))
-#else
-                    if (hapResult == HapResult_No_Error && !ofxHapPY::frameMatchesStream(textureFormat, _videoStream->codec->codec_tag))
-#endif
-                    {
-                        hapResult = HapResult_Bad_Frame;
-                    }
-                    if (hapResult == HapResult_No_Error)
-                    {
-#if OFX_HAP_HAS_CODECPAR
-                        size_t length = ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->width) * ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->height);
-#else
-                        size_t length = ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->width) * ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->height);
-#endif
-                        if (textureFormat == HapTextureFormat_RGB_DXT1)
-                        {
-                            length /= 2;
-                        }
-                        if (_decodedFrame.buffer.size() != length)
-                        {
-                            _decodedFrame.buffer.resize(length);
-                        }
-                        unsigned long bytesUsed;
-                        hapResult = HapDecode(packet->data,
-                                              packet->size,
-                                              0,
-                                              ofxHapPY::doDecode,
-                                              NULL,
-                                              _decodedFrame.buffer.data(),
-                                              static_cast<unsigned long>(_decodedFrame.buffer.size()),
-                                              &bytesUsed,
-                                              &textureFormat);
-                    }
-                }
-                if (hapResult == HapResult_No_Error)
-                {
-                    _decodedFrame.pts = packet->pts;
-                    _decodedFrame.duration = packet->duration;
-                    _decodedFrame.index = packet->pos;
-                    _wantsUpload = true;
-                }
-                else
-                {
-                    _decodedFrame.invalidate();
-                }
-                av_packet_free(&packet);
-            }
-        }
-    }
-}
-
 bool ofxHapPlayer::getHapAvailable() const
 {
     std::lock_guard<std::mutex> guard(_lock);
     if (_videoStream)
     {
 #if OFX_HAP_HAS_CODECPAR
-        switch (_videoStream->codecpar->codec_tag) {
+    switch (_videoStream->codecpar->codec_tag) {
 #else
-        switch (_videoStream->codec->codec_tag) {
+    uint32_t tag = 0;
+    if (_videoStream->codec) tag = _videoStream->codec->codec_tag;
+    else if (_videoStream->codecpar) tag = _videoStream->codecpar->codec_tag;
+    switch (tag) {
 #endif
             case MKTAG('H', 'a', 'p', '1'):
             case MKTAG('H', 'a', 'p', '5'):
@@ -539,16 +383,37 @@ ofTexture* ofxHapPlayer::getTexture()
             texData.width = ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->width);
             texData.height = ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->height);
 #else
-            texData.width = ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->width);
-            texData.height = ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->height);
+            if (_videoStream->codec) {
+                texData.width = ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->width);
+                texData.height = ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->height);
+            } else if (_videoStream->codecpar) {
+                texData.width = ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->width);
+                texData.height = ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->height);
+            } else {
+                texData.width = 0;
+                texData.height = 0;
+            }
 #endif
             texData.textureTarget = GL_TEXTURE_2D;
             texData.glInternalFormat = internalFormat;
             _texture.allocate(texData, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV);
 
             // Now store the actual dimensions so drawing is correct
+#if OFX_HAP_HAS_CODECPAR
             _texture.texData.width = _videoStream->codecpar->width;
             _texture.texData.height = _videoStream->codecpar->height;
+#else
+            if (_videoStream->codec) {
+                _texture.texData.width = _videoStream->codec->width;
+                _texture.texData.height = _videoStream->codec->height;
+            } else if (_videoStream->codecpar) {
+                _texture.texData.width = _videoStream->codecpar->width;
+                _texture.texData.height = _videoStream->codecpar->height;
+            } else {
+                _texture.texData.width = 0;
+                _texture.texData.height = 0;
+            }
+#endif
             _texture.texData.tex_t = _texture.texData.width / _texture.texData.tex_w;
             _texture.texData.tex_u = _texture.texData.height / _texture.texData.tex_h;
 
@@ -579,8 +444,8 @@ ofTexture* ofxHapPlayer::getTexture()
             ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->width),
             ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->height),
 #else
-            ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->width),
-            ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->height),
+            (_videoStream->codec ? ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->width) : (_videoStream->codecpar ? ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->width) : 0)),
+            (_videoStream->codec ? ofxHapPY::roundUpToMultipleOf4(_videoStream->codec->height) : (_videoStream->codecpar ? ofxHapPY::roundUpToMultipleOf4(_videoStream->codecpar->height) : 0)),
 #endif
             internalFormat,
             static_cast<GLsizei>(_decodedFrame.buffer.size()),
@@ -605,26 +470,40 @@ ofTexture* ofxHapPlayer::getTexture()
 ofShader *ofxHapPlayer::getShader()
 {
     std::lock_guard<std::mutex> guard(_lock);
+    bool needShader = false;
 #if OFX_HAP_HAS_CODECPAR
     if (_videoStream && _videoStream->codecpar->codec_tag == MKTAG('H', 'a', 'p', 'Y'))
-#else
-    if (_videoStream && _videoStream->codec->codec_tag == MKTAG('H', 'a', 'p', 'Y'))
-#endif
     {
-        if (_shader.isLoaded() == false)
-        {
-            bool success = _shader.setupShaderFromSource(GL_VERTEX_SHADER, ofxHapPY::vertexShader);
-            if (success)
-            {
-                success = _shader.setupShaderFromSource(GL_FRAGMENT_SHADER, ofxHapPY::fragmentShader);
-            }
-            if (success)
-            {
-                _shader.linkProgram();
-            }
-        }
-        if (_shader.isLoaded()) return &_shader;
+        needShader = true;
     }
+#else
+    if (_videoStream)
+    {
+        uint32_t tag = 0;
+        if (_videoStream->codec) tag = _videoStream->codec->codec_tag;
+        else if (_videoStream->codecpar) tag = _videoStream->codecpar->codec_tag;
+        if (tag == MKTAG('H', 'a', 'p', 'Y'))
+        {
+            needShader = true;
+        }
+    }
+#endif
+
+    if (!needShader) return nullptr;
+
+    if (_shader.isLoaded() == false)
+    {
+        bool success = _shader.setupShaderFromSource(GL_VERTEX_SHADER, ofxHapPY::vertexShader);
+        if (success)
+        {
+            success = _shader.setupShaderFromSource(GL_FRAGMENT_SHADER, ofxHapPY::fragmentShader);
+        }
+        if (success)
+        {
+            _shader.linkProgram();
+        }
+    }
+    if (_shader.isLoaded()) return &_shader;
     return nullptr;
 }
 
@@ -660,10 +539,6 @@ void ofxHapPlayer::play()
     if (_clock.getDone())
     {
         _clock.syncAt(0, _frameTime);
-        if (_audioThread)
-        {
-            _audioThread->sync(_clock, false);
-        }
     }
     if (_clock.getPaused())
     {
@@ -694,10 +569,6 @@ void ofxHapPlayer::setPaused(bool pause, bool locked)
             _playing = true;
         }
         _clock.setPausedAt(pause, _frameTime);
-        if (_audioThread)
-        {
-            _audioThread->sync(_clock, true);
-        }
     }
 }
 
@@ -714,7 +585,9 @@ float ofxHapPlayer::getWidth() const
 #if OFX_HAP_HAS_CODECPAR
         return _videoStream->codecpar->width;
 #else
-        return _videoStream->codec->width;
+        if (_videoStream->codec) return _videoStream->codec->width;
+        if (_videoStream->codecpar) return _videoStream->codecpar->width;
+        return 0;
 #endif
     }
     else
@@ -731,7 +604,9 @@ float ofxHapPlayer::getHeight() const
 #if OFX_HAP_HAS_CODECPAR
         return _videoStream->codecpar->height;
 #else
-        return _videoStream->codec->height;
+        if (_videoStream->codec) return _videoStream->codec->height;
+        if (_videoStream->codecpar) return _videoStream->codecpar->height;
+        return 0;
 #endif
     }
     else
@@ -813,10 +688,6 @@ void ofxHapPlayer::setLoopState(ofLoopType state)
     if (mode != _clock.mode)
     {
         _clock.mode = mode;
-        if (_audioThread)
-        {
-            _audioThread->sync(_clock, false);
-        }
     }
 }
 
@@ -843,10 +714,6 @@ void ofxHapPlayer::setSpeed(float speed)
 {
     std::lock_guard<std::mutex> guard(_lock);
     _clock.setRateAt(speed, _frameTime);
-    if (_audioThread)
-    {
-        _audioThread->sync(_clock, true);
-    }
 }
 
 float ofxHapPlayer::getDuration() const
@@ -903,10 +770,6 @@ void ofxHapPlayer::setVideoPTSLoaded(int64_t pts, bool round_up)
 void ofxHapPlayer::setPTSLoaded(int64_t pts)
 {
     _clock.syncAt(pts, _frameTime);
-    if (_audioThread)
-    {
-        _audioThread->sync(_clock, false);
-    }
 }
 
 void ofxHapPlayer::firstFrame()
@@ -956,8 +819,7 @@ void ofxHapPlayer::setVolume(float volume)
     {
         std::lock_guard<std::mutex> guard(_lock);
         _volume = ofClamp(volume, 0.0, 1.0);
-        if (_audioThread)
-            _audioThread->setVolume(_volume);
+        // audio removed: no-op
     }
 }
 
@@ -1009,134 +871,27 @@ void ofxHapPlayer::setTimeout(int microseconds)
     _timeout = std::chrono::microseconds(microseconds);
 }
 
-ofxHapPlayer::AudioOutput::AudioOutput()
-: _started(false), _channels(0), _sampleRate(0)
+// Event handler called from ofEvents().update
+void ofxHapPlayer::update(ofEventArgs& args)
 {
-    
+    (void)args;
+    update();
 }
 
-ofxHapPlayer::AudioOutput::~AudioOutput()
+// Public update called by users or the event handler
+void ofxHapPlayer::update()
 {
+    std::lock_guard<std::mutex> guard(_lock);
+    // Update internal time reference
+    updatePTS();
 
+    // Minimal update implementation: ensure decoded frame upload flag
+    // remains controlled by demuxer/packet processing. This stub keeps
+    // behaviour consistent while audio support is disabled.
+    (void)_wantsUpload;
 }
 
-unsigned int ofxHapPlayer::AudioOutput::getBestRate(unsigned int r) const
-{
-    auto devices = _soundStream.getDeviceList();
-    for (const auto& device : devices) {
-        if (device.isDefaultOutput)
-        {
-            auto rates = device.sampleRates;
-            unsigned int bestRate = 0;
-            for (auto rate : rates) {
-                if (rate == r)
-                {
-                    return rate;
-                }
-                else if (rate < r && rate > bestRate)
-                {
-                    bestRate = rate;
-                }
-            }
-            if (bestRate == 0)
-            {
-                bestRate = r;
-            }
-            return bestRate;
-        }
-    }
-    return r;
-}
-
-void ofxHapPlayer::AudioOutput::configure(int channels, int sampleRate, std::shared_ptr<ofxHap::RingBuffer> buffer)
-{
-    _buffer = buffer;
-    _channels = channels;
-    _sampleRate = sampleRate;
-}
-
-void ofxHapPlayer::AudioOutput::start()
-{
-    if (!_started)
-    {
-        ofSoundStreamSettings settings;
-        settings.numInputChannels = 0;
-        settings.numOutputChannels = _channels;
-        settings.sampleRate = _sampleRate;
-        settings.setOutListener(this);
-
-        // TODO: best values for last 2 params?
-        settings.bufferSize = 128;
-        settings.numBuffers = 2;
-
-        _started = _soundStream.setup(settings);
-        if (!_started)
-        {
-            ofLogError("ofxHapPlayer", "Error starting audio playback.");
-        }
-    }
-    else
-    {
-        _soundStream.start();
-    }
-}
-
-void ofxHapPlayer::AudioOutput::stop()
-{
-    _soundStream.stop();
-}
-
-void ofxHapPlayer::AudioOutput::close()
-{
-    _soundStream.stop();
-    _soundStream.close();
-    _started = false;
-}
-
-void ofxHapPlayer::AudioOutput::audioOut(ofSoundBuffer& buffer)
-{
-    int wanted = static_cast<int>(buffer.getNumFrames());
-    int filled = 0;
-
-    const float *src[2];
-    int count[2];
-
-    _buffer->readBegin(src[0], count[0], src[1], count[1]);
-
-    for (int i = 0; i < 2; i++)
-    {
-        int todo = std::min(wanted - filled, count[i]);
-        if (todo > 0)
-        {
-            size_t copy = todo * sizeof(float) * buffer.getNumChannels();
-            float *out = &buffer.getBuffer()[filled * buffer.getNumChannels()];
-            memcpy(out, src[i], copy);
-            filled += todo;
-        }
-    }
-
-    _buffer->readEnd(filled);
-
-    if (filled < wanted)
-    {
-        float *out = &buffer.getBuffer()[filled * buffer.getNumChannels()];
-        av_samples_set_silence((uint8_t **)&out,
-                               0,
-                               wanted - filled,
-                               static_cast<int>(buffer.getNumChannels()),
-                               AV_SAMPLE_FMT_FLT);
-    }
-}
-
-void ofxHapPlayer::startAudio()
-{
-    _audioOut.start();
-}
-
-void ofxHapPlayer::stopAudio()
-{
-    _audioOut.stop();
-}
+// audio unsupported: implementations removed
 
 ofxHapPlayer::DecodedFrame::DecodedFrame() :
     pts(AV_NOPTS_VALUE), duration(0)

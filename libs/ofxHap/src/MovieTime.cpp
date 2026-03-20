@@ -28,7 +28,8 @@
 #include <ofxHap/MovieTime.h>
 #include <cstdlib>
 #include <algorithm>
-#include <libavformat/avformat.h>
+// No libav include required; use local compat header if needed.
+#include <ofxHap/av_compat.h>
 
 ofxHap::TimeRangeSequence ofxHap::MovieTime::flatten(ofxHap::TimeRangeSequence sequence)
 {

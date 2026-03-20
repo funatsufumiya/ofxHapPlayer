@@ -27,7 +27,7 @@
 
 // New Demuxer implementation using lightweight MOV parser (tcxMovParser)
 #include <ofxHap/Demuxer.h>
-#include <ofxHap/ffmpeg_compat.h>
+#include <ofxHap/av_compat.h>
 #include <ofxHap/tcxMovParser.h>
 #include <mutex>
 #include <memory>

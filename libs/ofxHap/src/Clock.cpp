@@ -26,9 +26,8 @@
  */
 
 #include <ofxHap/Clock.h>
-extern "C" {
-#include <libavutil/avutil.h>
-}
+// use local minimal av compatibility header instead of libavutil
+#include <ofxHap/av_compat.h>
 
 namespace ofxHap {
     static int64_t clockMod(int64_t k, int64_t n)

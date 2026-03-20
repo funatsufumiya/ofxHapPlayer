@@ -36,7 +36,7 @@
 #include "ErrorReceiving.h"
 
 // Minimal AV types provided by our lightweight compatibility header
-#include "ofxHap/ffmpeg_compat.h"
+#include "ofxHap/av_compat.h"
 
 namespace ofxHap {
     class PacketReceiver : public ErrorReceiving {
