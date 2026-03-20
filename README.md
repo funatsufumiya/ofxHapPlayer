@@ -1,4 +1,4 @@
-ofxHapPlayer
+ofxHapPlayer (without libav/ffmpeg)
 ============
 
 Changes
