@@ -8,6 +8,10 @@ Changes
 - MOV container parsing uses the lightweight [TrussC](https://github.com/TrussC-org/TrussC)'s [`tcxMovParser`](https://github.com/TrussC-org/TrussC/blob/94c98cf79ab68038e86168d1042a2e9cbb35ba2f/addons/tcxHap/src/tcxMovParser.h) instead of libav.
 - A small compatibility shim (`libs/ofxHap/include/ofxHap/av_compat.h`) provides minimal AV types/helpers.
 
+### License
+
+For additional license (especially [`tcxMovParser`](https://github.com/TrussC-org/TrussC/blob/94c98cf79ab68038e86168d1042a2e9cbb35ba2f/addons/tcxHap/src/tcxMovParser.h) aka tcxHap addon), please see [docs/LICENSE.md of TrussC](https://github.com/TrussC-org/TrussC/blob/94c98cf79ab68038e86168d1042a2e9cbb35ba2f/docs/LICENSE.md)
+
 <br>
 
 ---
