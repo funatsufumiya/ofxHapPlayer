@@ -1,6 +1,28 @@
 ofxHapPlayer
 ============
 
+Changes
+
+- Removed dependency on FFmpeg / libav (LGPL); project no longer use libav/ffmpeg.
+- Audio playback is currently not supported; audio tracks may be parsed but are not played.
+- MOV container parsing uses the lightweight TrussC `tcxMovParser` instead of libav.
+- A small compatibility shim (`libs/ofxHap/include/ofxHap/av_compat.h`) provides minimal AV types/helpers.
+
+<br>
+
+---
+---
+
+vvv ORIGINAL README vvv
+
+---
+---
+
+<br>
+
+ofxHapPlayer
+============
+
 A Hap player for OpenFrameworks on macOS, Windows and Linux.
 
 Hap is a codec for fast video playback. You can learn more about Hap, and find codecs for encoding, at the [main Hap project](https://github.com/Vidvox/hap).
